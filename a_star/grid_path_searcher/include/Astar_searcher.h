@@ -6,8 +6,10 @@
 
 #include <Eigen/Eigen>
 #include <iostream>
+#include <string>
 
 #include "node.h"
+
 
 class AstarPathFinder {
  private:
@@ -25,7 +27,7 @@ class AstarPathFinder {
   GridNodePtr terminatePtr;
   std::multimap<double, GridNodePtr> openSet;
 
-  double getHeu(GridNodePtr node1, GridNodePtr node2);
+  double getHeu(GridNodePtr node1, GridNodePtr node2, int heuIndex);
   void AstarGetSucc(GridNodePtr currentPtr,
                     std::vector<GridNodePtr>& neighborPtrSets,
                     std::vector<double>& edgeCostSets);
@@ -42,6 +44,7 @@ class AstarPathFinder {
   AstarPathFinder(){};
   ~AstarPathFinder(){};
   void AstarGraphSearch(Eigen::Vector3d start_pt, Eigen::Vector3d end_pt);
+  int AstarGraphSearchHeu(Eigen::Vector3d start_pt, Eigen::Vector3d end_pt, int heuIndex, std::string heuristic);
   void resetGrid(GridNodePtr ptr);
   void resetUsedGrids();
 

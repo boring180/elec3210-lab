@@ -43,14 +43,14 @@ void AstarPathFinder::initGridMap(double _resolution, Vector3d global_xyz_l,
     }
   }
 }
-
+// Reset a single node
 void AstarPathFinder::resetGrid(GridNodePtr ptr) {
   ptr->id = 0;
   ptr->cameFrom = NULL;
   ptr->gScore = inf;
   ptr->fScore = inf;
 }
-
+// Reset the whole grid
 void AstarPathFinder::resetUsedGrids() {
   for (int i = 0; i < GLX_SIZE; i++)
     for (int j = 0; j < GLY_SIZE; j++)
@@ -144,9 +144,23 @@ inline void AstarPathFinder::AstarGetSucc(GridNodePtr currentPtr,
    * Note: Be careful with the index bound                 *
    *********************************************************/
   // TODO: Implement Step 4
+  Vector3i current_idx = currentPtr->index;
+  Vector3d current_coord = currentPtr->coord;
+  for (int i = -1; i <= 1; i++) {
+    for (int j = -1; j <= 1; j++) {
+      for (int k = -1; k <= 1; k++) {
+        if (i == 0 && j == 0 && k == 0) continue;
+        Vector3i neighbor_idx = current_idx + Vector3i(i, j, k);
+        if (!isFree(neighbor_idx)) continue;
+        double edge_cost = (gridIndex2coord(neighbor_idx) - current_coord).norm();
+        neighborPtrSets.push_back(GridNodeMap[neighbor_idx(0)][neighbor_idx(1)][neighbor_idx(2)]);
+        edgeCostSets.push_back(edge_cost);
+      }
+    }
+  }
 }
 
-double AstarPathFinder::getHeu(GridNodePtr node1, GridNodePtr node2) {
+double AstarPathFinder::getHeu(GridNodePtr node1, GridNodePtr node2, int heuIndex) {
   /*********************************************************
    * STEP 1: finish the AstarPathFinder::getHeu             *
    * This function is the heuristic function, which is      *
@@ -162,22 +176,97 @@ double AstarPathFinder::getHeu(GridNodePtr node1, GridNodePtr node2) {
    * heuristics on the path planning.                       *
    * ********************************************************/
 
-  double h;
+  double h = 0;
   auto node1_coord = node1->coord;
   auto node2_coord = node2->coord;
 
   // TODO: Implement heuristic function
+  // Manhattan distance
+  if (heuIndex == 0) {
+  h = abs(node1_coord[0] - node2_coord[0]) +
+      abs(node1_coord[1] - node2_coord[1]) +
+      abs(node1_coord[2] - node2_coord[2]);
+  }
+
+  // Euclidean distance
+
+  if (heuIndex == 1) {
+    h = sqrt(pow(node1_coord[0] - node2_coord[0], 2) +
+            pow(node1_coord[1] - node2_coord[1], 2) +
+            pow(node1_coord[2] - node2_coord[2], 2));
+  }
+
+  // Diagonal distance
+  if (heuIndex == 2) {
+    h = max(abs(node1_coord[0] - node2_coord[0]),
+                max(abs(node1_coord[1] - node2_coord[1]),
+            abs(node1_coord[2] - node2_coord[2])));
+  }
+
+  // Dijkstra's algorithm
+  if (heuIndex == 3) {
+    h = 0;
+  }
+
+  if (heuIndex == 4) {
+    h = sqrt(pow(node1_coord[0] - node2_coord[0], 2) +
+            pow(node1_coord[1] - node2_coord[1], 2) +
+            pow(node1_coord[2] - node2_coord[2], 2));
+    for (int i = 0; i < resolution; i++) {
+          Vector3d coord = node1_coord + Vector3d(node1_coord[0] - node2_coord[0] * i * inv_resolution,
+                                                  node1_coord[1] - node2_coord[1] * i * inv_resolution,
+                                                  node1_coord[2] - node2_coord[2] * i * inv_resolution);
+          Vector3i idx = coord2gridIndex(coord);
+          if (isOccupied(idx)) {
+            h += 1;
+            // cout << "Obstacle: " << coord.transpose() << endl;
+          }
+    }
+  }
 
   return h;
 }
 
-void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
+void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt){
+
+  int count_of_search = 0;
+
+  resetUsedGrids();
+  count_of_search = AstarPathFinder::AstarGraphSearchHeu(start_pt, end_pt, 3, "Dijkstra");
+  getVisitedNodes();
+  cout << "Search count of Dijkstra: " << count_of_search << endl;
+
+  resetUsedGrids();
+  count_of_search = AstarPathFinder::AstarGraphSearchHeu(start_pt, end_pt, 2, "Diagonal");
+  getVisitedNodes();
+  cout << "Search count of Diagonal: " << count_of_search << endl;
+
+  resetUsedGrids();
+  count_of_search = AstarPathFinder::AstarGraphSearchHeu(start_pt, end_pt, 1, "Euclidean");
+  getVisitedNodes();
+  cout << "Search count of Euclidean: " << count_of_search << endl;
+
+  resetUsedGrids();
+  count_of_search = AstarPathFinder::AstarGraphSearchHeu(start_pt, end_pt, 4, "Custom");
+  getVisitedNodes();
+  cout << "Search count of Custom: " << count_of_search << endl;
+
+  resetUsedGrids();
+  count_of_search = AstarPathFinder::AstarGraphSearchHeu(start_pt, end_pt, 0, "Manhattan");
+  getVisitedNodes();
+  cout << "Search count of Manhattan: " << count_of_search << endl;
+}
+
+int AstarPathFinder::AstarGraphSearchHeu(Vector3d start_pt, Vector3d end_pt, int heuIndex, std::string heuristic) {
   ros::Time time_1 = ros::Time::now();
 
   // index of start_point and end_point
   Vector3i start_idx = coord2gridIndex(start_pt);
   Vector3i end_idx = coord2gridIndex(end_pt);
   goalIdx = end_idx;
+  cout << "start_pt_idx: " << start_idx.transpose() << endl;
+  cout << "end_pt_idx: " << end_idx.transpose() << endl;
+
 
   // position of start_point and end_point
   start_pt = gridIndex2coord(start_idx);
@@ -196,11 +285,10 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
 
   // put start node in open set
   startPtr->gScore = 0;
-  startPtr->fScore = getHeu(startPtr, endPtr);
+  startPtr->fScore = getHeu(startPtr, endPtr, heuIndex);
 
   // STEP 1: finish the AstarPathFinder::getHeu , which is the heuristic
   // function
-  startPtr->id = 1;
   startPtr->coord = start_pt;
   openSet.insert(make_pair(startPtr->fScore, startPtr));
 
@@ -212,10 +300,13 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
    * id: 1 in OPEN, id -1: in CLOSE )                              *
    * **************************************************************/
   // TODO: Make start point as visited
+  startPtr->id = 1;
 
   vector<GridNodePtr> neighborPtrSets;
   vector<double> edgeCostSets;
   Eigen::Vector3i current_idx;  // record the current index
+
+  int count_of_serach = 0;
 
   // this is the main loop
   while (!openSet.empty()) {
@@ -226,11 +317,23 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
      * ***********************************************************/
     // TODO: Implement Step 3
 
-    // TODO: If the current node is the goal node, break the loop
+    // Find the node with the Score that is in the open set and remove it from the open set
+    currentPtr = openSet.begin()->second;
+    openSet.erase(openSet.begin());
 
+    // cout << "current: " << currentPtr->index.transpose() << endl;
+    // cout << "F: " << currentPtr->fScore << " G: " << currentPtr->gScore << endl;
+
+    // TODO: If the current node is the goal node, break the loop
+    if (currentPtr->index == goalIdx) {
+      terminatePtr = currentPtr;
+      // cout << "Find the goal node!" << endl;
+      break;
+    }
     // Get the succetion
     AstarGetSucc(currentPtr, neighborPtrSets,
                  edgeCostSets);  // STEP 4: finish AstarPathFinder::AstarGetSucc
+    // cout << "neighbor size: " << neighborPtrSets.size() << endl;
 
     /***************************************************************
      * STEP 5: For all unexpanded neigbors "m" of node "n", please  *
@@ -243,7 +346,12 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
       //       neighborPtrSets[i]->id = 1 : unexpanded, equal to this node is in
       //       open set
 
+      count_of_serach++;
+
       neighborPtr = neighborPtrSets[i];
+      if (neighborPtr == nullptr) 
+        ROS_ERROR("Error: Neighbor pointer is null!");
+      // cout << "neighbor: " << neighborPtr->index.transpose() << endl;
       if (neighborPtr->id == 0) {  // discover a new node, which is not in the
                                    // closed set and open set
         /**************************************************************
@@ -252,8 +360,14 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
          * Note: shall update: gScore, fScore, cameFrom, id            *
          * **************************************************************/
         // TODO: Implement Step 6
-
-        continue;
+        // Calculate the gScore, fScore, and cameFrom of the neighbor node
+        // cout << "ID0 \n";
+        neighborPtr->gScore = currentPtr->gScore + edgeCostSets[i];
+        neighborPtr->fScore = getHeu(neighborPtr, endPtr, heuIndex) + neighborPtr->gScore;
+        neighborPtr->cameFrom = currentPtr;
+        // Add the neighbor node to the open set
+        neighborPtr->id = 1;
+        openSet.insert(make_pair(neighborPtr->fScore, neighborPtr));
       } else if (neighborPtr->id ==
                  1) {  // this node is in open set and need to judge if it needs
                        // to update, the "0" should be deleted when you are
@@ -264,16 +378,30 @@ void AstarPathFinder::AstarGraphSearch(Vector3d start_pt, Vector3d end_pt) {
          * Note: shall update: gScore; fScore; cameFrom                *
          * **************************************************************/
         // TODO: Implement Step 7
+        if(neighborPtr->gScore > currentPtr->gScore + edgeCostSets[i]){
+          // Update the gScore, fScore, and cameFrom of the neighbor node
+          neighborPtr->gScore = currentPtr->gScore + edgeCostSets[i];
+          neighborPtr->fScore = getHeu(neighborPtr, endPtr, heuIndex) + neighborPtr->gScore;
+          neighborPtr->cameFrom = currentPtr;
 
-        continue;
+          // Add the neighbor node to the open set
+          for (auto it = openSet.begin(); it != openSet.end(); it++) {
+            if (it->second == neighborPtr) {
+              openSet.erase(it);
+              break;
+            }
+          }
+          openSet.insert(make_pair(neighborPtr->fScore, neighborPtr));
+        }
       }
     }
   }
-  // if search fails
   ros::Time time_2 = ros::Time::now();
   if ((time_2 - time_1).toSec() > 0.1)
-    ROS_WARN("Time consume in Astar path finding is %f",
-             (time_2 - time_1).toSec());
+    ROS_WARN("Time consume in Astar path finding with heuristic %s is %f",
+             heuristic.c_str(), (time_2 - time_1).toSec());
+
+  return count_of_serach;
 }
 
 vector<Vector3d> AstarPathFinder::getPath() {
@@ -292,6 +420,8 @@ vector<Vector3d> AstarPathFinder::getPath() {
   for (auto ptr : gridPath) path.push_back(ptr->coord);
 
   reverse(path.begin(), path.end());
+
+  cout << "Path length:" << path.size() << endl;
 
   return path;
 }

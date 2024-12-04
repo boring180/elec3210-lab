@@ -6,13 +6,26 @@
 #include <sensor_msgs/PointCloud2.h>
 #include <visualization_msgs/Marker.h>
 #include <visualization_msgs/MarkerArray.h>
+#include <cmath>
 
 using namespace std;
 using namespace Eigen;
 
+// In case of w = 0, we need to avoid division by zero
+static inline double safeDivide(double numerator, double denominator)
+{
+  const double epsilon = 1e-6;
+  if (std::abs(denominator) < epsilon)
+  {
+    denominator = (denominator < 0) ? -epsilon : epsilon;
+  }
+  return numerator / denominator;
+}
+
 EKFSLAM::~EKFSLAM() {}
 
-EKFSLAM::EKFSLAM(ros::NodeHandle& nh) : nh_(nh) {
+EKFSLAM::EKFSLAM(ros::NodeHandle &nh) : nh_(nh)
+{
   //    initialize ros publisher
   lidar_sub =
       nh_.subscribe("/velodyne_points", 1, &EKFSLAM::cloudHandler, this);
@@ -36,18 +49,22 @@ EKFSLAM::EKFSLAM(ros::NodeHandle& nh) : nh_(nh) {
   /**
    * TODO: initialize the state vector and covariance matrix
    */
-  mState = Eigen::VectorXd::Zero(3);  // x, y, yaw
-  mCov = mCov;
-  R = R;  // process noise
-  Q = Q;  // measurement noise
-
+  mState = Eigen::VectorXd::Zero(3);  // x, y, yaw  3 + 2N
+  mCov = Eigen::MatrixXd::Identity(3, 3); // 3 + 2N x 3 + 2N
+  R = Eigen::MatrixXd::Identity(2, 2);   // process noise   2 x 2
+  R.diagonal() << 1e4, 1e4;
+  Q = Eigen::MatrixXd::Identity(2, 2);   // measurement noise 2 x 2
+  Q.diagonal() << 1e1, 1e1;
   std::cout << "EKF SLAM initialized" << std::endl;
 }
 
-void EKFSLAM::run() {
+void EKFSLAM::run()
+{
   ros::Rate rate(1000);
-  while (ros::ok()) {
-    if (cloudQueue.empty() || odomQueue.empty()) {
+  while (ros::ok())
+  {
+    if (cloudQueue.empty() || odomQueue.empty())
+    {
       rate.sleep();
       continue;
     }
@@ -63,14 +80,16 @@ void EKFSLAM::run() {
     auto odomIter = odomQueue.front();
     auto odomPrevIter = odomQueue.front();
     while (!odomQueue.empty() && odomIter != odomQueue.back() &&
-           odomIter.first.stamp < cloudHeader.stamp) {
+           odomIter.first.stamp < cloudHeader.stamp)
+    {
       odomPrevIter = odomIter;
       odomIter = odomQueue.front();
       odomQueue.pop();
     }
     odomMutex.unlock();
 
-    if (firstFrame) {
+    if (firstFrame)
+    {
       firstFrame = false;
       Twb = Eigen::Matrix4d::Identity();
       cloudHeaderLast = cloudHeader;
@@ -100,72 +119,109 @@ void EKFSLAM::run() {
   }
 }
 
-double EKFSLAM::normalizeAngle(double angle) {
-  if (angle > M_PI) {
+// Normalize the angle into range [-pi, pi]
+double EKFSLAM::normalizeAngle(double angle)
+{
+  if (angle > M_PI)
+  {
     angle -= 2 * M_PI;
-  } else if (angle < -M_PI) {
+  }
+  else if (angle < -M_PI)
+  {
     angle += 2 * M_PI;
   }
   return angle;
 }
 
-Eigen::MatrixXd EKFSLAM::jacobGt(const Eigen::VectorXd& state,
-                                 Eigen::Vector2d ut, double dt) {
+Eigen::MatrixXd EKFSLAM::jacobGt(const Eigen::VectorXd &state,
+                                 Eigen::Vector2d ut, double dt)
+{
   int num_state = state.rows();
   Eigen::MatrixXd Gt = Eigen::MatrixXd::Identity(num_state, num_state);
   /**
    * TODO: implement the Jacobian Gt
    */
+  double v = ut(0);
+  double w = ut(1);
+  Gt(0, 2) = safeDivide(cos(state(2) + w * dt) - cos(state(2)), w) * v;
+  Gt(1, 2) = safeDivide(sin(state(2) + w * dt) - sin(state(2)), w) * v;
   return Gt;
 }
 
-Eigen::MatrixXd EKFSLAM::jacobFt(const Eigen::VectorXd& state,
-                                 Eigen::Vector2d ut, double dt) {
+Eigen::MatrixXd EKFSLAM::jacobFt(const Eigen::VectorXd &state,
+                                 Eigen::Vector2d ut, double dt)
+{
   int num_state = state.rows();
   Eigen::MatrixXd Ft = Eigen::MatrixXd::Zero(num_state, 2);
   /**
    * TODO: implement the Jacobian Ft
    */
+  double v = ut(0);
+  double w = ut(1);
+  Ft(0, 0) = -safeDivide(sin(state(2)) - sin(state(2) + w * dt), w);
+  Ft(1, 0) = safeDivide(cos(state(2)) - cos(state(2) + w * dt), w);
+  Ft(2, 1) = dt;
   return Ft;
 }
 
-Eigen::MatrixXd EKFSLAM::jacobB(const Eigen::VectorXd& state,
-                                Eigen::Vector2d ut, double dt) {
+Eigen::MatrixXd EKFSLAM::jacobB(const Eigen::VectorXd &state,
+                                Eigen::Vector2d ut, double dt)
+{
   int num_state = state.rows();
   Eigen::MatrixXd B = Eigen::MatrixXd::Zero(num_state, 2);
-  B(0, 0) = dt * cos(state(2));
-  B(1, 0) = dt * sin(state(2));
+  double v = ut(0);
+  double w = ut(1);
+  B(0, 0) = -safeDivide(sin(state(2)) - sin(state(2) + w * dt), w);
+  B(1, 0) = safeDivide(cos(state(2)) - cos(state(2) + w * dt), w);
   B(2, 1) = dt;
   return B;
 }
 
-void EKFSLAM::predictState(Eigen::VectorXd& state, Eigen::MatrixXd& cov,
-                           Eigen::Vector2d ut, double dt) {
+void EKFSLAM::predictState(Eigen::VectorXd &state, Eigen::MatrixXd &cov,
+                           Eigen::Vector2d ut, double dt)
+{
   // Note: ut = [v, w]
-  state = state + jacobB(state, ut, dt) * ut;  // update state
   Eigen::MatrixXd Gt = jacobGt(state, ut, dt);
   Eigen::MatrixXd Ft = jacobFt(state, ut, dt);
-  //	cov = Gt * cov * Gt.transpose() + Ft * R * Ft.transpose(); // update
-  // covariance
+  state = state + jacobB(state, ut, dt) * ut; // update state
+  // std::cout<< "Gt" << Gt.rows() << " x " << Gt.cols() << endl; 
+  // std::cout<< "cov" << cov.rows() << " x " << cov.cols() << endl; 
+  // std::cout<< "Ft" << Ft.rows() << " x " << Ft.cols() << endl; 
+  // std::cout<< "R" << R.rows() << " x " << R.cols() << endl; 
+  cov = Gt * cov * Gt.transpose() + Ft * R * Ft.transpose(); // update
+  // std::cout << "End update" << endl;
 }
 
-Eigen::Vector2d EKFSLAM::transform(const Eigen::Vector2d& p,
-                                   const Eigen::Vector3d& x) {
+Eigen::Vector2d EKFSLAM::transform(const Eigen::Vector2d &p,
+                                   const Eigen::Vector3d &x)
+{
   Eigen::Vector2d p_t;
   p_t(0) = p(0) * cos(x(2)) - p(1) * sin(x(2)) + x(0);
   p_t(1) = p(0) * sin(x(2)) + p(1) * cos(x(2)) + x(1);
   return p_t;
 }
 
-void EKFSLAM::addNewLandmark(const Eigen::Vector2d& lm,
-                             const Eigen::MatrixXd& InitCov) {
+void EKFSLAM::addNewLandmark(const Eigen::Vector2d &lm,
+                             const Eigen::MatrixXd &InitCov)
+{
   // add new landmark to mState and mCov
   /**
    * TODO: implement the function
    */
+  int origSize = mState.size();
+
+  mState.conservativeResize(origSize + 2);
+  mState.tail(2) = lm;
+
+  mCov.conservativeResize(origSize + 2, origSize + 2);
+  mCov.block(0, origSize, origSize, 2).setZero();
+  mCov.block(origSize, 0, 2, origSize).setZero();
+  mCov.block<2, 2>(origSize, origSize) = InitCov;
+  // std::cout << "Add new LM" << std::endl;
 }
 
-void EKFSLAM::accumulateMap() {
+void EKFSLAM::accumulateMap()
+{
   Eigen::Matrix4d Twb = Pose3DTo6D(mState.segment(0, 3));
   pcl::PointCloud<pcl::PointXYZ>::Ptr transformedCloud(
       new pcl::PointCloud<pcl::PointXYZ>);
@@ -178,56 +234,131 @@ void EKFSLAM::accumulateMap() {
   voxelSampler.filter(*mapCloud);
 }
 
-void EKFSLAM::updateMeasurement() {
+void EKFSLAM::updateMeasurement()
+{
   cylinderPoints = extractCylinder->extract(
-      laserCloudIn, cloudHeader);  // 2D pole centers in the laser/body frame
-  Eigen::Vector3d xwb = mState.block<3, 1>(0, 0);  // pose in the world frame
+      laserCloudIn, cloudHeader);                 // 2D pole centers in the laser/body frame
+  Eigen::Vector3d xwb = mState.block<3, 1>(0, 0); // pose in the world frame
   int num_landmarks =
-      (mState.rows() - 3) / 2;  // number of landmarks in the state vector
-  int num_obs = cylinderPoints.rows();  // number of observations
+      (mState.rows() - 3) / 2;         // number of landmarks in the state vector
+  // cout << "Current LM:  " << num_landmarks << endl;
+  int num_obs = cylinderPoints.rows(); // number of observations
+  // cout << "Detect LM:  " << num_obs << endl;
   Eigen::VectorXi indices = Eigen::VectorXi::Ones(num_obs) *
-                            -1;  // indices of landmarks in the state vector
-  for (int i = 0; i < num_obs; ++i) {
-    Eigen::Vector2d pt_transformed =
-        transform(cylinderPoints.row(i),
-                  xwb);  // 2D pole center in the world frame
-                         // Implement the data association here, i.e., find the
-                         // corresponding landmark for each observation
-                         /**
-                          * TODO: data association
-                          *
-                          * **/
-    if (indices(i) == -1) {
+                            -1; // indices of landmarks in the state vector
+  for (int i = 0; i < num_obs; ++i)
+  {
+    Eigen::Vector2d pt_transformed = transform(cylinderPoints.row(i), xwb);
+    // 2D pole center in the world frame
+    // Implement the data association here, i.e., find the
+    // corresponding landmark for each observation
+    /**
+     * TODO: data association
+     *
+     * **/
+    // The distance of NN
+    double distance = INFINITY;
+    int lm_index = -1;
+    for (int j = 0; j < num_landmarks; j++)
+    {
+      double challenger_distance = sqrt(pow((pt_transformed(0) - mState(3 + 2 * j)), 2) + pow((pt_transformed(1) - mState(4 + 2 * j)), 2));
+      if(distance > challenger_distance)
+      {
+        distance = challenger_distance;
+        lm_index = j;
+      }
+    }
+    // Calculate the square euclidian distance and apply a threshhold
+    // cout << "NN: " << distance << endl;
+    // The greater the threshold is, it is less likely to construct a new lm
+    if (distance < 3)
+    {
+      indices(i) = lm_index;
+    }
+
+    if (indices(i) == -1)
+    {
       indices(i) = ++globalId;
       addNewLandmark(pt_transformed, Q);
     }
   }
+  // cout << "Number of landmark: " << mState.size() - 3 << endl;
   // simulating bearing model
   Eigen::VectorXd z = Eigen::VectorXd::Zero(2 * num_obs);
-  for (int i = 0; i < num_obs; ++i) {
-    const Eigen::Vector2d& pt = cylinderPoints.row(i);
+  for (int i = 0; i < num_obs; ++i)
+  {
+    const Eigen::Vector2d &pt = cylinderPoints.row(i);
     z(2 * i, 0) = pt.norm();
     z(2 * i + 1, 0) = atan2(pt(1), pt(0));
   }
   // update the measurement vector
   num_landmarks = (mState.rows() - 3) / 2;
-  for (int i = 0; i < num_obs; ++i) {
+  // cout << "Updated LM:  " << num_landmarks << endl;
+  // cout << mState << endl;
+  // cout << mCov << endl;
+  for (int i = 0; i < num_obs; ++i)
+  {
     int idx = indices(i);
-    if (idx == -1 || idx + 1 > num_landmarks) continue;
-    const Eigen::Vector2d& landmark = mState.block<2, 1>(3 + idx * 2, 0);
+     double square_distance = pow((mState(0) - mState(3 + 2 * idx)), 2) + pow((mState(1) - mState(4 + 2 * idx)), 2);
+    // std::cout << "Start update for lm " << idx << endl;
+    if (idx == -1 || idx + 1 > num_landmarks)
+      continue;
+    const Eigen::Vector2d &landmark = mState.block<2, 1>(3 + idx * 2, 0);
     // Implement the measurement update here, i.e., update the state vector and
     // covariance matrix
     /**
      * TODO: measurement update
      */
+    // std::cout<< "mState " << mState.size() << endl; 
+    Eigen::MatrixXd lowHt(2, 5); // 2 x 5
+    // std::cout<< "i " << i << endl; 
+    double deltaX = mState(3 + 2 * idx) - mState(0);
+    double deltaY = mState(4 + 2 * idx) - mState(1);
+    double q = pow(deltaX, 2) + pow(deltaY, 2);
+    double norm = sqrt(q);
+    lowHt << -norm * deltaX , -norm * deltaY,            0, norm * deltaX , norm * deltaY,
+                      deltaY,        -deltaX,           -q,        -deltaY,        deltaX;
+    lowHt = lowHt / q;
+    Eigen::MatrixXd F = Eigen::MatrixXd::Zero(5, 3 + 2 * num_landmarks); // 5 x 3 + 2N
+    F(0, 0) = 1;
+    F(1 ,1) = 1;
+    F(2, 2) = 1;
+    F(3, 2 * idx + 3) = 1;
+    F(4, 2 * idx + 4) = 1;
+    Eigen::MatrixXd H = lowHt * F; // 2 x 3 + 2N
+    // std::cout<< "H" << H.rows() << " x " << H.cols() << endl; 
+    // std::cout<< "mCov" << mCov.rows() << " x " << mCov.cols() << endl; 
+    Eigen::MatrixXd Q_weighted = Q * square_distance;
+    Eigen::MatrixXd K = mCov * H.transpose() * (H * mCov * H.transpose() + Q_weighted).inverse();
+    Eigen::Vector2d z_i;
+    z_i << z(2 * i, 0), z(1 + 2 * i, 0);
+    double theta_hat = normalizeAngle(atan2(deltaY, deltaX) - mState(2));
+    Eigen::Vector2d z_i_hat;
+    z_i_hat << norm, theta_hat;
+    mState = mState + K * (z_i  - z_i_hat);
+    Eigen::MatrixXd In = Eigen::MatrixXd::Identity(mCov.rows(), mCov.rows());
+    mCov = (In - K * H) * mCov;
+    // cout << mCov << endl;
+    // std::cout << "Updated for lm " << idx << endl;
+    // cout << "mState: " << mState.transpose() << endl;
+    // cout << "mCov: " << mCov.transpose() << endl;
+    // cout << "K: " << K.transpose() << endl;
+    // cout << "H: " << H.transpose() << endl;
+    // cout << "Q: " << Q.transpose() << endl;
   }
+  // ROS_INFO_STREAM("Covariance Matrix:\n" << mCov);
+  // ROS_INFO_STREAM("mState Vector:\n" << mState);
+  mState(2) = normalizeAngle(mState(2));
+  ROS_INFO_STREAM("Number of lm:\n" << (mState.rows() - 3) / 2);
 }
 
-void EKFSLAM::publishMsg() {
+void EKFSLAM::publishMsg()
+{
   // publish map cylinder
   visualization_msgs::MarkerArray markerArray;
   int num_landmarks = (mState.rows() - 3) / 2;
-  for (int i = 0; i < num_landmarks; ++i) {
+  for (int i = 0; i < num_landmarks; ++i)
+  {
     visualization_msgs::Marker marker;
     marker.header.frame_id = "map";
     marker.header.stamp = cloudHeader.stamp;
@@ -256,7 +387,8 @@ void EKFSLAM::publishMsg() {
 
   int num_obs = cylinderPoints.rows();
   markerArray.markers.clear();
-  for (int i = 0; i < num_obs; ++i) {
+  for (int i = 0; i < num_obs; ++i)
+  {
     visualization_msgs::Marker marker;
     marker.header.frame_id = "map";
     marker.header.stamp = cloudHeader.stamp;
@@ -338,14 +470,16 @@ void EKFSLAM::publishMsg() {
 }
 
 void EKFSLAM::cloudHandler(
-    const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg) {
+    const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
+{
   cloudQueueMutex.lock();
   std_msgs::Header cloudHeader = laserCloudMsg->header;
   cloudQueue.push(std::make_pair(cloudHeader, laserCloudMsg));
   cloudQueueMutex.unlock();
 }
 
-void EKFSLAM::odomHandler(const nav_msgs::OdometryConstPtr& odomMsg) {
+void EKFSLAM::odomHandler(const nav_msgs::OdometryConstPtr &odomMsg)
+{
   odomMutex.lock();
   std_msgs::Header odomHeader = odomMsg->header;
   odomQueue.push(std::make_pair(odomHeader, odomMsg));
@@ -353,7 +487,8 @@ void EKFSLAM::odomHandler(const nav_msgs::OdometryConstPtr& odomMsg) {
 }
 
 pcl::PointCloud<pcl::PointXYZ>::Ptr EKFSLAM::parseCloud(
-    const sensor_msgs::PointCloud2ConstPtr& laserCloudMsg) {
+    const sensor_msgs::PointCloud2ConstPtr &laserCloudMsg)
+{
   pcl::PointCloud<pcl::PointXYZ>::Ptr cloudTmp(
       new pcl::PointCloud<pcl::PointXYZ>);
   pcl::fromROSMsg(*laserCloudMsg, *cloudTmp);
